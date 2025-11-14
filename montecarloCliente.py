@@ -1,108 +1,169 @@
 """
-Módulo ``MontecarloCliente``
----------------------------
-
-Este módulo define la clase ``MontecarloCliente``, que actúa como
-el **consumidor** en la arquitectura productor–consumidor. Su tarea
-principal es recibir las muestras generadas por un ``MontecarloServidor``
-e utilizar un ``CostFlyweight`` para calcular la utilidad de la
-impresora portátil. Luego acumula las utilidades de múltiples
-simulaciones y calcula estadísticas como la mínima, máxima y media.
-
-Para su correcto funcionamiento, el cliente depende de dos objetos:
-
-* ``servidor``: instancia de ``MontecarloServidor`` que produce los
-  valores aleatorios de las variables.
-* ``costos``: instancia de ``CostFlyweight`` que encapsula los
-  costes fijos (precio de venta, costes administrativos y
-  costes de publicidad).
-
-Las funciones de este módulo están documentadas para describir
-claramente los parámetros, procesos y valores de retorno involucrados.
+Módulo MontecarloCliente
+------------------------
+Define al cliente en la arquitectura productor–consumidor. El cliente es el
+punto de entrada del programa: crea al servidor, coordina la simulación,
+consume las muestras y calcula las métricas finales de utilidad.
 """
 
 from __future__ import annotations
 
-from typing import Tuple, List
+from typing import List, Dict, Tuple
+from queue import Queue
+import threading
 
-from flyweight import CostFlyweight
-from montecarloProductor import MontecarloServidor
+from flyweight import FlyweightFactory, CostFlyweight
+from montecarloServidor import MontecarloServidor
 
 
 class MontecarloCliente:
-    """Clase que representa al consumidor en la simulación Montecarlo.
-
-    Esta clase coordina las iteraciones de la simulación. Para cada
-    iteración, solicita una muestra de entradas al ``servidor``,
-    calcula la utilidad con ayuda de los costes fijos proporcionados
-    por el flyweight ``costos`` y acumula los resultados para
-    derivar estadísticas al final.
+    """
+    Cliente/consumidor que calcula la utilidad a partir de las muestras
+    generadas por el servidor.
     """
 
     def __init__(self, servidor: MontecarloServidor, costos: CostFlyweight) -> None:
-        """Inicializa el cliente con el productor y los costes fijos.
+        """
+        Inicializa el cliente con una referencia al servidor y a los costos fijos.
 
         Args:
-            servidor (MontecarloServidor): Instancia que genera los valores
-                aleatorios de las variables (C1, C2, X).
-            costos (CostFlyweight): Flyweight con los valores fijos de
-                precio de venta (PV), costes administrativos (CA) y
-                costes de publicidad (CB).
+            servidor (MontecarloServidor): Instancia del servidor que genera
+                las muestras (C1, C2, X).
+            costos (CostFlyweight): Flyweight que contiene los costos fijos
+                (precio de venta, costos administrativos y de publicidad).
         """
         self.servidor = servidor
         self.costos = costos
+        self.utilidades: List[float] = []
 
     def calcular_utilidad(self, c1: float, c2: float, x: float) -> float:
-        """Calcula la utilidad para un conjunto dado de variables.
-
-        La fórmula de la utilidad es:
-
-        .. code-block:: text
+        """
+        Calcula la utilidad usando la fórmula del modelo:
 
             Utilidad = (PV - C1 - C2) * X - (CA + CB)
 
-        donde los costes fijos (PV, CA, CB) provienen de ``self.costos``.
-
         Args:
-            c1 (float): Coste de mano de obra por unidad.
-            c2 (float): Coste de componentes por unidad.
-            x (float): Demanda del primer año.
+            c1 (float): Costo de mano de obra por unidad.
+            c2 (float): Costo de componentes por unidad.
+            x  (float): Demanda del primer año.
 
         Returns:
-            float: Valor de la utilidad calculada.
+            float: Utilidad económica generada para el conjunto (C1, C2, X).
         """
-        margen_unitario = self.costos.precio_venta - c1 - c2
-        utilidad = margen_unitario * x - (self.costos.costo_admin + self.costos.costo_publicidad)
+        margen = self.costos.precio_venta - c1 - c2
+        utilidad = margen * x - (self.costos.costo_admin + self.costos.costo_publicidad)
         return float(utilidad)
 
-    def ejecutar_simulacion(self, iteraciones: int = 10000) -> Tuple[float, float, float]:
-        """Ejecuta la simulación Montecarlo y calcula estadísticas.
+    def consumir(self, cola: "Queue[tuple[float, float, float] | None]") -> None:
+        """
+        Consume muestras de la cola compartida y calcula la utilidad de cada una.
 
-        Este método realiza las siguientes operaciones:
-
-        1. Repite ``iteraciones`` veces:
-            - Obtiene un conjunto (C1, C2, X) desde el ``servidor``.
-            - Calcula la utilidad con ``calcular_utilidad``.
-            - Almacena la utilidad en una lista interna.
-        2. Determina la utilidad mínima, máxima y media a partir de
-           la lista acumulada.
+        Este método está pensado para ejecutarse en un hilo separado o en el
+        hilo principal. Lee elementos de la cola hasta encontrar el valor
+        centinela ``None``, que indica que el servidor ya no producirá más
+        datos.
 
         Args:
-            iteraciones (int, opcional): Número de simulaciones a realizar.
-                Por defecto, 10 000.
+            cola (Queue[tuple[float, float, float] | None]): Cola desde la cual
+                se obtienen las tuplas (C1, C2, X). Cuando se recibe ``None``,
+                el método deja de consumir.
 
         Returns:
-            tuple[float, float, float]: Una tupla que contiene (mínimo,
-                máximo, promedio) de las utilidades obtenidas.
+            None: Las utilidades calculadas se almacenan en ``self.utilidades``.
         """
-        utilidades: List[float] = []
-        for _ in range(iteraciones):
-            c1, c2, x = self.servidor.generar_muestra()
+        while True:
+            muestra = cola.get()
+            if muestra is None:
+                # Señal de fin de datos
+                cola.task_done()
+                break
+
+            c1, c2, x = muestra
             utilidad = self.calcular_utilidad(c1, c2, x)
-            utilidades.append(utilidad)
-        # Calcular estadísticas
-        utilidad_minima = float(min(utilidades)) if utilidades else 0.0
-        utilidad_maxima = float(max(utilidades)) if utilidades else 0.0
-        utilidad_media = float(sum(utilidades) / len(utilidades)) if utilidades else 0.0
-        return (utilidad_minima, utilidad_maxima, utilidad_media)
-        #dsdfdsf
+            self.utilidades.append(utilidad)
+            cola.task_done()
+
+    def ejecutar_simulacion_concurrente(self, iteraciones: int = 10000) -> Dict[str, float]:
+        """
+        Ejecuta la simulación Montecarlo completa desde el lado del cliente,
+        usando un esquema concurrente productor–consumidor.
+
+        El flujo es:
+            1. Crear una cola compartida.
+            2. Crear un hilo productor que llama al servidor para generar
+               ``iteraciones`` muestras.
+            3. Consumir la cola desde el cliente hasta recibir el centinela.
+            4. Calcular métricas (mínima, máxima y promedio) a partir de las
+               utilidades acumuladas.
+
+        Args:
+            iteraciones (int, opcional): Número total de simulaciones a ejecutar.
+                Por defecto, 10000.
+
+        Returns:
+            dict: Diccionario con las métricas de utilidad:
+                - "min": Utilidad mínima.
+                - "max": Utilidad máxima.
+                - "mean": Utilidad promedio.
+        """
+        cola: "Queue[tuple[float, float, float] | None]" = Queue()
+
+        # Hilo productor ejecutando código del servidor
+        hilo_prod = threading.Thread(
+            target=self.servidor.hilo_productor,
+            args=(cola, iteraciones),
+            name="HiloProductor",
+        )
+
+        # Iniciar productor
+        hilo_prod.start()
+
+        # Consumir en el hilo actual (cliente)
+        self.consumir(cola)
+
+        # Esperar a que el productor termine
+        hilo_prod.join()
+        # Asegurarnos de que la cola esté vacía
+        cola.join()
+
+        if not self.utilidades:
+            return {"min": 0.0, "max": 0.0, "mean": 0.0}
+
+        return {
+            "min": min(self.utilidades),
+            "max": max(self.utilidades),
+            "mean": sum(self.utilidades) / len(self.utilidades),
+        }
+
+
+def main() -> None:
+    """
+    Punto de entrada del programa.
+
+    Crea el flyweight de costos fijos, instancia el servidor y el cliente,
+    ejecuta la simulación concurrente y muestra las métricas finales.
+
+    Returns:
+        None. Los resultados se imprimen en pantalla.
+    """
+    factory = FlyweightFactory()
+    costos = factory.get_flyweight(
+        pv=70000.0,
+        ca=160_000_000.0,
+        cb=80_000_000.0,
+    )
+
+    servidor = MontecarloServidor()
+    cliente = MontecarloCliente(servidor, costos)
+
+    resultados = cliente.ejecutar_simulacion_concurrente(iteraciones=10000)
+
+    print("\nResultados de la simulación Montecarlo (cliente → servidor):")
+    print("------------------------------------------------------------")
+    print(f"Utilidad mínima:   {resultados['min']:,.2f}")
+    print(f"Utilidad máxima:   {resultados['max']:,.2f}")
+    print(f"Utilidad promedio: {resultados['mean']:,.2f}")
+
+
+if __name__ == "__main__":
+    main()
